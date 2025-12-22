@@ -1,0 +1,18 @@
+{
+	"name": "backend",
+	"module": "index.js",
+	"type": "module",
+	"scripts": {
+		"dev": "bun --watch index.js",
+		"start": "bun index.js"
+	},
+	"private": true,
+	"dependencies": {
+		"@libsql/client": "latest",
+		"bcryptjs": "^3.0.3",
+		"dotenv": "latest",
+		"hono": "latest",
+		"jsonwebtoken": "latest",
+		"ws": "^8.18.3"
+	}
+}
