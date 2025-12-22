@@ -184,20 +184,22 @@ export async function sendRoomMessage(roomId, senderId, content, type = 'text', 
 		args: [messageId, roomId, senderId, recipientId, content, type, now]
 	});
 
-	// Get sender username
+	// Get sender username and gender
 	const senderResult = await db.execute({
-		sql: 'SELECT username FROM users WHERE id = ?',
+		sql: 'SELECT username, gender FROM users WHERE id = ?',
 		args: [senderId]
 	});
 
-	// Get recipient username if secret message
+	// Get recipient username and gender if secret message
 	let recipientUsername = null;
+	let recipientGender = null;
 	if (recipientId) {
 		const recipientResult = await db.execute({
-			sql: 'SELECT username FROM users WHERE id = ?',
+			sql: 'SELECT username, gender FROM users WHERE id = ?',
 			args: [recipientId]
 		});
 		recipientUsername = recipientResult.rows[0]?.username;
+		recipientGender = recipientResult.rows[0]?.gender;
 	}
 
 	return {
@@ -206,7 +208,9 @@ export async function sendRoomMessage(roomId, senderId, content, type = 'text', 
 		sender_id: senderId,
 		recipient_id: recipientId,
 		sender_username: senderResult.rows[0]?.username,
+		sender_gender: senderResult.rows[0]?.gender,
 		recipient_username: recipientUsername,
+		recipient_gender: recipientGender,
 		content,
 		type,
 		created_at: now
@@ -218,7 +222,9 @@ export async function getRoomMessages(roomId, userId, limit = 100) {
 	const result = await db.execute({
 		sql: `SELECT rm.*, 
               u1.username as sender_username,
-              u2.username as recipient_username
+              u1.gender as sender_gender,
+              u2.username as recipient_username,
+              u2.gender as recipient_gender
               FROM room_messages rm
               JOIN users u1 ON rm.sender_id = u1.id
               LEFT JOIN users u2 ON rm.recipient_id = u2.id
@@ -242,7 +248,7 @@ export async function getRoomMessages(roomId, userId, limit = 100) {
 // Get room members
 export async function getRoomMembers(roomId) {
 	const result = await db.execute({
-		sql: `SELECT rm.*, u.username, u.is_online
+		sql: `SELECT rm.*, u.username, u.gender, u.is_online, u.is_guest
               FROM room_members rm
               JOIN users u ON rm.user_id = u.id
               WHERE rm.room_id = ?
@@ -325,5 +331,3 @@ export async function deleteExpiredRooms() {
 
 	return { message: 'Expired rooms deleted' };
 }
-
-

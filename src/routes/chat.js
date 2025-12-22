@@ -88,13 +88,13 @@ chat.get('/messages/:sessionId', async (c) => {
 chat.post('/messages', async (c) => {
 	try {
 		const user = c.get('user');
-		const { session_id, content, type = 'text' } = await c.req.json();
+		const { session_id, content, type = 'text', reply_to_message_id } = await c.req.json();
 
 		if (!session_id || !content) {
 			return c.json({ error: 'session_id and content are required' }, 400);
 		}
 
-		const message = await sendMessage(session_id, user.id, content, type);
+		const message = await sendMessage(session_id, user.id, content, type, reply_to_message_id);
 
 		return c.json({
 			message: 'Message sent',

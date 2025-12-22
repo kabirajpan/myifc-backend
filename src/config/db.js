@@ -81,11 +81,13 @@ export async function createMessagesTable() {
       is_read BOOLEAN DEFAULT 0,
       visible_to_user1 BOOLEAN DEFAULT 1,
       visible_to_user2 BOOLEAN DEFAULT 1,
+      reply_to_message_id TEXT,
       FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
-      FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (reply_to_message_id) REFERENCES messages(id) ON DELETE SET NULL
     )
   `);
-	console.log('✅ Messages table created');
+	console.log('✅ Messages table created with reply support');
 }
 
 // 5. User sessions (track login/logout for chat deletion logic)

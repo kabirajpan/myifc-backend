@@ -42,7 +42,7 @@ export async function createOrGetChatSession(user1_id, user2_id) {
 }
 
 // Send a message
-export async function sendMessage(session_id, sender_id, content, type = 'text') {
+export async function sendMessage(session_id, sender_id, content, type = 'text', reply_to_message_id = null) {
 	const messageId = generateId();
 	const now = Date.now();
 
@@ -67,15 +67,14 @@ export async function sendMessage(session_id, sender_id, content, type = 'text')
 	}
 
 	// Check if the other user has logged out
-	// If user1 is sending and user2 logged out, message should only be visible to user1
-	// If user2 is sending and user1 logged out, message should only be visible to user2
 	const visibleToUser1 = isUser1 ? true : !session.user1_logged_out;
 	const visibleToUser2 = isUser2 ? true : !session.user2_logged_out;
 
+	// INSERT with reply_to_message_id
 	await db.execute({
-		sql: `INSERT INTO messages (id, session_id, sender_id, content, type, created_at, visible_to_user1, visible_to_user2)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		args: [messageId, session_id, sender_id, content, type, now, visibleToUser1 ? 1 : 0, visibleToUser2 ? 1 : 0]
+		sql: `INSERT INTO messages (id, session_id, sender_id, content, type, created_at, visible_to_user1, visible_to_user2, reply_to_message_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		args: [messageId, session_id, sender_id, content, type, now, visibleToUser1 ? 1 : 0, visibleToUser2 ? 1 : 0, reply_to_message_id]
 	});
 
 	// Reset logout flags when new message is sent (reactivate chat)
@@ -92,21 +91,25 @@ export async function sendMessage(session_id, sender_id, content, type = 'text')
 		});
 	}
 
-	// Get sender username for WebSocket broadcast
+	// Get sender username and gender for WebSocket broadcast
 	const senderResult = await db.execute({
-		sql: 'SELECT username FROM users WHERE id = ?',
+		sql: 'SELECT username, gender FROM users WHERE id = ?',
 		args: [sender_id]
 	});
 	const senderUsername = senderResult.rows[0]?.username || 'Unknown';
+	const senderGender = senderResult.rows[0]?.gender || null;
 
 	const messageData = {
 		id: messageId,
 		session_id,
 		sender_id,
+		sender_username: senderUsername,
+		sender_gender: senderGender,
 		content,
 		type,
 		created_at: now,
-		is_read: false
+		is_read: false,
+		reply_to_message_id: reply_to_message_id
 	};
 
 	// Broadcast to other user via WebSocket
@@ -138,12 +141,22 @@ export async function getMessages(session_id, user_id) {
 	// Get messages visible to this user
 	const visibilityField = isUser1 ? 'visible_to_user1' : 'visible_to_user2';
 
+	// UPDATED: Get reply message details with LEFT JOIN
 	const result = await db.execute({
-		sql: `SELECT m.*, u.username as sender_username
-              FROM messages m
-              JOIN users u ON m.sender_id = u.id
-              WHERE m.session_id = ? AND m.${visibilityField} = 1
-              ORDER BY m.created_at ASC`,
+		sql: `SELECT 
+			  m.*, 
+			  u.username as sender_username, 
+			  u.gender as sender_gender,
+			  reply_msg.content as reply_to_message_content,
+			  reply_user.username as reply_to_message_sender,
+			  reply_user.gender as reply_to_message_gender,
+			  reply_msg.created_at as reply_to_message_time
+			  FROM messages m
+			  JOIN users u ON m.sender_id = u.id
+			  LEFT JOIN messages reply_msg ON m.reply_to_message_id = reply_msg.id
+			  LEFT JOIN users reply_user ON reply_msg.sender_id = reply_user.id
+			  WHERE m.session_id = ? AND m.${visibilityField} = 1
+			  ORDER BY m.created_at ASC`,
 		args: [session_id]
 	});
 
@@ -155,7 +168,9 @@ export async function getUserChats(user_id) {
 	const result = await db.execute({
 		sql: `SELECT cs.*, 
               u1.username as user1_username,
+              u1.gender as user1_gender,
               u2.username as user2_username,
+              u2.gender as user2_gender,
               u1.is_online as user1_online,
               u2.is_online as user2_online,
               (SELECT content FROM messages WHERE session_id = cs.id ORDER BY created_at DESC LIMIT 1) as last_message,
@@ -176,6 +191,7 @@ export async function getUserChats(user_id) {
 			session_id: chat.id,
 			other_user_id: isUser1 ? chat.user2_id : chat.user1_id,
 			other_user_name: isUser1 ? chat.user2_username : chat.user1_username,
+			other_user_gender: isUser1 ? chat.user2_gender : chat.user1_gender,
 			other_user_online: isUser1 ? chat.user2_online : chat.user1_online,
 			last_message: chat.last_message,
 			last_message_time: chat.last_message_time,
@@ -256,7 +272,9 @@ export async function getChatSession(session_id) {
 	const result = await db.execute({
 		sql: `SELECT cs.*, 
               u1.username as user1_username,
+              u1.gender as user1_gender,
               u2.username as user2_username,
+              u2.gender as user2_gender,
               u1.is_online as user1_online,
               u2.is_online as user2_online
               FROM chat_sessions cs
