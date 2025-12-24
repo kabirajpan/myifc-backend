@@ -1,5 +1,8 @@
 import { db } from '../config/db.js';
 import { generateId } from '../utils/idGenerator.js';
+import { broadcastRoomMessage, broadcastRoomReaction, broadcastRoomPresence, broadcastRoomReactionRemoval } from './websocket.service.js';
+
+
 
 // Create room (admin or registered user)
 export async function createRoom(creatorId, name, description, isAdminRoom = false) {
@@ -145,21 +148,65 @@ export async function joinRoom(roomId, userId) {
 		args: [memberId, roomId, userId, now]
 	});
 
+
+	const userResult = await db.execute({
+		sql: 'SELECT id, username, gender, is_guest FROM users WHERE id = ?',
+		args: [userId]
+	});
+
+	if (userResult.rows.length > 0) {
+		const user = userResult.rows[0];
+
+		// Broadcast user joined
+		try {
+			await broadcastRoomPresence(roomId, user, 'joined');
+		} catch (wsError) {
+			console.error('WebSocket presence broadcast failed:', wsError);
+		}
+	}
+
 	return { message: 'Joined room successfully' };
+
 }
 
 // Leave room
 export async function leaveRoom(roomId, userId) {
+	// Get user info for broadcasting BEFORE deleting
+	const userResult = await db.execute({
+		sql: 'SELECT id, username, gender, is_guest FROM users WHERE id = ?',
+		args: [userId]
+	});
+
+	// Delete user from room
 	await db.execute({
 		sql: 'DELETE FROM room_members WHERE room_id = ? AND user_id = ?',
 		args: [roomId, userId]
 	});
 
+	if (userResult.rows.length > 0) {
+		const user = userResult.rows[0];
+
+		// Broadcast user left
+		try {
+			await broadcastRoomPresence(roomId, user, 'left');
+		} catch (wsError) {
+			console.error('WebSocket presence broadcast failed:', wsError);
+		}
+	}
+
 	return { message: 'Left room successfully' };
 }
 
-// Send message in room (including secret messages)
-export async function sendRoomMessage(roomId, senderId, content, type = 'text', recipientId = null) {
+// Send message in room (including secret messages) - UPDATED
+export async function sendRoomMessage(
+	roomId,
+	senderId,
+	content,
+	type = 'text',
+	replyToMessageId = null,
+	caption = null,
+	recipientId = null
+) {
 	// Check if user is in room
 	const member = await db.execute({
 		sql: 'SELECT * FROM room_members WHERE room_id = ? AND user_id = ?',
@@ -178,10 +225,12 @@ export async function sendRoomMessage(roomId, senderId, content, type = 'text', 
 	const messageId = generateId();
 	const now = Date.now();
 
+	// UPDATED INSERT with new columns
 	await db.execute({
-		sql: `INSERT INTO room_messages (id, room_id, sender_id, recipient_id, content, type, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		args: [messageId, roomId, senderId, recipientId, content, type, now]
+		sql: `INSERT INTO room_messages 
+          (id, room_id, sender_id, recipient_id, content, type, created_at, is_read, caption, reply_to_message_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		args: [messageId, roomId, senderId, recipientId, content, type, now, 0, caption, replyToMessageId]
 	});
 
 	// Get sender username and gender
@@ -202,6 +251,48 @@ export async function sendRoomMessage(roomId, senderId, content, type = 'text', 
 		recipientGender = recipientResult.rows[0]?.gender;
 	}
 
+	// Get reply message data if reply exists
+	let replyData = null;
+	if (replyToMessageId) {
+		const replyResult = await db.execute({
+			sql: `SELECT rm.content, rm.type, rm.caption, rm.created_at, u.username, u.gender
+            FROM room_messages rm
+            JOIN users u ON rm.sender_id = u.id
+            WHERE rm.id = ?`,
+			args: [replyToMessageId]
+		});
+		replyData = replyResult.rows[0];
+	}
+
+	try {
+		await broadcastRoomMessage(roomId, {
+			id: messageId,
+			room_id: roomId,
+			sender_id: senderId,
+			recipient_id: recipientId,
+			sender_username: senderResult.rows[0]?.username,
+			sender_gender: senderResult.rows[0]?.gender,
+			recipient_username: recipientUsername,
+			recipient_gender: recipientGender,
+			content,
+			type,
+			caption,
+			reply_to_message_id: replyToMessageId,
+			...(replyData && {
+				reply_to_message_content: replyData.content,
+				reply_to_message_sender: replyData.username,
+				reply_to_message_gender: replyData.gender,
+				reply_to_message_time: replyData.created_at,
+				reply_to_message_type: replyData.type,
+				reply_to_message_caption: replyData.caption
+			}),
+			created_at: now
+		}, senderId);
+	} catch (wsError) {
+		console.error('WebSocket broadcast failed:', wsError);
+		// Don't fail the message send if WebSocket fails
+	}
+
 	return {
 		id: messageId,
 		room_id: roomId,
@@ -213,24 +304,44 @@ export async function sendRoomMessage(roomId, senderId, content, type = 'text', 
 		recipient_gender: recipientGender,
 		content,
 		type,
+		caption,
+		reply_to_message_id: replyToMessageId,
+		// Add reply data if exists
+		...(replyData && {
+			reply_to_message_content: replyData.content,
+			reply_to_message_sender: replyData.username,
+			reply_to_message_gender: replyData.gender,
+			reply_to_message_time: replyData.created_at,
+			reply_to_message_type: replyData.type,
+			reply_to_message_caption: replyData.caption
+		}),
 		created_at: now
 	};
 }
 
-// Get room messages (filter secret messages based on user)
+// Get room messages (filter secret messages based on user) - UPDATED with reply data
 export async function getRoomMessages(roomId, userId, limit = 100) {
 	const result = await db.execute({
 		sql: `SELECT rm.*, 
-              u1.username as sender_username,
-              u1.gender as sender_gender,
-              u2.username as recipient_username,
-              u2.gender as recipient_gender
-              FROM room_messages rm
-              JOIN users u1 ON rm.sender_id = u1.id
-              LEFT JOIN users u2 ON rm.recipient_id = u2.id
-              WHERE rm.room_id = ?
-              ORDER BY rm.created_at DESC
-              LIMIT ?`,
+          u1.username as sender_username,
+          u1.gender as sender_gender,
+          u2.username as recipient_username,
+          u2.gender as recipient_gender,
+          -- Get reply message data if exists
+          rm2.content as reply_to_message_content,
+          rm2.type as reply_to_message_type,
+          rm2.caption as reply_to_message_caption,
+          rm2.created_at as reply_to_message_time,
+          u3.username as reply_to_message_sender,
+          u3.gender as reply_to_message_gender
+          FROM room_messages rm
+          JOIN users u1 ON rm.sender_id = u1.id
+          LEFT JOIN users u2 ON rm.recipient_id = u2.id
+          LEFT JOIN room_messages rm2 ON rm.reply_to_message_id = rm2.id
+          LEFT JOIN users u3 ON rm2.sender_id = u3.id
+          WHERE rm.room_id = ?
+          ORDER BY rm.created_at DESC
+          LIMIT ?`,
 		args: [roomId, limit]
 	});
 
@@ -330,4 +441,124 @@ export async function deleteExpiredRooms() {
 	});
 
 	return { message: 'Expired rooms deleted' };
+}
+
+export async function reactToRoomMessage(messageId, userId, emoji) {
+	// Check if user has access to the message
+	const messageCheck = await db.execute({
+		sql: `SELECT rm.room_id, rm.sender_id, rm.recipient_id, rm.type
+          FROM room_messages rm
+          WHERE rm.id = ?`,
+		args: [messageId]
+	});
+
+	if (messageCheck.rows.length === 0) {
+		throw new Error('Message not found');
+	}
+
+	const message = messageCheck.rows[0];
+
+	// Check if user is in the room
+	const memberCheck = await db.execute({
+		sql: 'SELECT * FROM room_members WHERE room_id = ? AND user_id = ?',
+		args: [message.room_id, userId]
+	});
+
+	if (memberCheck.rows.length === 0) {
+		throw new Error('You must be in the room to react to messages');
+	}
+
+	// Check if user can see this message (for secret messages)
+	if (message.type === 'secret') {
+		if (message.sender_id !== userId && message.recipient_id !== userId) {
+			throw new Error('You cannot react to this message');
+		}
+	}
+
+	const reactionId = generateId();
+	const now = Date.now();
+
+	await db.execute({
+		sql: `INSERT INTO room_message_reactions (id, message_id, user_id, emoji, created_at)
+          VALUES (?, ?, ?, ?, ?)`,
+		args: [reactionId, messageId, userId, emoji, now]
+	});
+
+	// Get user info for the reaction
+	const userResult = await db.execute({
+		sql: 'SELECT username, gender FROM users WHERE id = ?',
+		args: [userId]
+	});
+
+	try {
+		await broadcastRoomReaction(message.room_id, {
+			id: reactionId,
+			message_id: messageId,
+			user_id: userId,
+			username: userResult.rows[0]?.username,
+			gender: userResult.rows[0]?.gender,
+			emoji,
+			created_at: now
+		}, messageId);
+	} catch (wsError) {
+		console.error('WebSocket reaction broadcast failed:', wsError);
+	}
+
+	return {
+		id: reactionId,
+		message_id: messageId,
+		user_id: userId,
+		username: userResult.rows[0]?.username,
+		gender: userResult.rows[0]?.gender,
+		emoji,
+		created_at: now
+	};
+}
+
+// Get reactions for room message - NEW FUNCTION
+export async function getRoomMessageReactions(messageId) {
+	const result = await db.execute({
+		sql: `SELECT rmr.*, u.username, u.gender
+          FROM room_message_reactions rmr
+          JOIN users u ON rmr.user_id = u.id
+          WHERE rmr.message_id = ?
+          ORDER BY rmr.created_at DESC`,
+		args: [messageId]
+	});
+
+	return result.rows;
+}
+
+// Remove reaction from room message - UPDATED
+export async function removeRoomMessageReaction(reactionId, userId) {
+	// First get reaction details to find room_id and message_id
+	const reactionCheck = await db.execute({
+		sql: `SELECT rmr.message_id, rm.room_id 
+          FROM room_message_reactions rmr
+          JOIN room_messages rm ON rmr.message_id = rm.id
+          WHERE rmr.id = ? AND rmr.user_id = ?`,
+		args: [reactionId, userId]
+	});
+
+	if (reactionCheck.rows.length === 0) {
+		throw new Error('Reaction not found or you do not have permission to remove it');
+	}
+
+	const { message_id, room_id } = reactionCheck.rows[0];
+
+	// Delete the reaction
+	await db.execute({
+		sql: `DELETE FROM room_message_reactions 
+          WHERE id = ? AND user_id = ?`,
+		args: [reactionId, userId]
+	});
+
+	// Broadcast removal
+	try {
+		await broadcastRoomReactionRemoval(room_id, reactionId, message_id);
+	} catch (wsError) {
+		console.error('WebSocket removal broadcast failed:', wsError);
+	}
+
+	return { message: 'Reaction removed' };
 }

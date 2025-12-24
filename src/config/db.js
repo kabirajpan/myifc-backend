@@ -19,7 +19,7 @@ export async function createUsersTable() {
       name TEXT,
       gender TEXT NOT NULL CHECK(gender IN ('male', 'female', 'other')),
       age INTEGER NOT NULL CHECK(age >= 18),
-      role TEXT DEFAULT 'guest' CHECK(role IN ('guest', 'user', 'admin', 'moderator', 'banned')),
+      role TEXT DEFAULT 'guest' CHECK(role IN ('guest', 'user', 'admin')),
       is_guest BOOLEAN DEFAULT 1,
       created_at INTEGER NOT NULL,
       last_login INTEGER,
@@ -67,8 +67,7 @@ export async function createChatSessionsTable() {
 	console.log('✅ Chat sessions table created');
 }
 
-// 4. Messages (text, image, gif, audio, emoji)
-// Updated Messages table with visibility flags
+// 4. Messages (text, image, gif, audio, emoji) - UPDATED with caption
 export async function createMessagesTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS messages (
@@ -81,16 +80,33 @@ export async function createMessagesTable() {
       is_read BOOLEAN DEFAULT 0,
       visible_to_user1 BOOLEAN DEFAULT 1,
       visible_to_user2 BOOLEAN DEFAULT 1,
-      reply_to_message_id TEXT,
+      reply_to_message_id TEXT, 
+      caption TEXT,
       FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (reply_to_message_id) REFERENCES messages(id) ON DELETE SET NULL
     )
   `);
-	console.log('✅ Messages table created with reply support');
+	console.log('✅ Messages table created with reply AND caption support');
 }
 
-// 5. User sessions (track login/logout for chat deletion logic)
+// 5. Message reactions (for private chat) - NEW
+export async function createMessageReactionsTable() {
+	await db.execute(`
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+	console.log('✅ Message reactions table created');
+}
+
+// 6. User sessions (track login/logout for chat deletion logic)
 export async function createUserSessionsTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS user_sessions (
@@ -105,7 +121,7 @@ export async function createUserSessionsTable() {
 	console.log('✅ User sessions table created');
 }
 
-// 6. Rooms table
+// 7. Rooms table
 export async function createRoomsTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS rooms (
@@ -123,7 +139,7 @@ export async function createRoomsTable() {
 	console.log('✅ Rooms table created');
 }
 
-// 7. Room messages
+// 8. Room messages - UPDATED with reply_to_message_id, caption, is_read
 export async function createRoomMessagesTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS room_messages (
@@ -134,15 +150,35 @@ export async function createRoomMessagesTable() {
       content TEXT NOT NULL,
       type TEXT DEFAULT 'text' CHECK(type IN ('text', 'image', 'gif', 'audio', 'emoji', 'system', 'secret')),
       created_at INTEGER NOT NULL,
+      is_read BOOLEAN DEFAULT 0,
+      caption TEXT,
+      reply_to_message_id TEXT,
       FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (reply_to_message_id) REFERENCES room_messages(id) ON DELETE SET NULL
     )
   `);
-	console.log('✅ Room messages table created');
+	console.log('✅ Room messages table created WITH REPLY AND CAPTION SUPPORT');
 }
 
-// 8. Room members (who's currently in the room)
+// 9. Room message reactions - NEW
+export async function createRoomMessageReactionsTable() {
+	await db.execute(`
+    CREATE TABLE IF NOT EXISTS room_message_reactions (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES room_messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+	console.log('✅ Room message reactions table created');
+}
+
+// 10. Room members (who's currently in the room)
 export async function createRoomMembersTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS room_members (
@@ -158,7 +194,7 @@ export async function createRoomMembersTable() {
 	console.log('✅ Room members table created');
 }
 
-// 9. Bans table (track temporary and permanent bans)
+// 11. Bans table (track temporary and permanent bans)
 export async function createBansTable() {
 	await db.execute(`
     CREATE TABLE IF NOT EXISTS bans (
@@ -178,16 +214,37 @@ export async function createBansTable() {
 	console.log('✅ Bans table created');
 }
 
+// 12. Media table - NEW
+export async function createMediaTable() {
+	await db.execute(`
+    CREATE TABLE IF NOT EXISTS media (
+      id TEXT PRIMARY KEY,
+      public_id TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('image', 'gif', 'audio')),
+      filename TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+	console.log('✅ Media table created');
+}
+
 // Initialize all tables
 export async function initDatabase() {
 	await createUsersTable();
 	await createFriendshipsTable();
 	await createChatSessionsTable();
 	await createMessagesTable();
+	await createMessageReactionsTable();
 	await createUserSessionsTable();
 	await createRoomsTable();
 	await createRoomMessagesTable();
+	await createRoomMessageReactionsTable();
 	await createRoomMembersTable();
 	await createBansTable();
+	await createMediaTable();
 	console.log('🎉 All tables initialized');
 }

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import {
 	createRoom,
 	getAllRooms,
-	getPublicRooms,  // ADD THIS
+	getPublicRooms,
 	getRoomById,
 	joinRoom,
 	leaveRoom,
@@ -10,13 +10,16 @@ import {
 	getRoomMessages,
 	getRoomMembers,
 	deleteRoom,
-	deleteExpiredRooms
+	deleteExpiredRooms,
+	reactToRoomMessage,
+	getRoomMessageReactions,
+	removeRoomMessageReaction
 } from '../services/room.service.js';
 import { authMiddleware, requireRegistered } from '../middleware/auth.js';
 
 const rooms = new Hono();
 
-// Public endpoint - no auth required (ADD THIS BEFORE authMiddleware)
+// Public endpoint - no auth required
 rooms.get('/public', async (c) => {
 	try {
 		const roomsList = await getPublicRooms();
@@ -103,18 +106,33 @@ rooms.post('/:roomId/leave', async (c) => {
 	}
 });
 
-// Send message in room
+// Send message in room - UPDATED
 rooms.post('/:roomId/messages', async (c) => {
 	try {
 		const user = c.get('user');
 		const roomId = c.req.param('roomId');
-		const { content, type = 'text', recipient_id } = await c.req.json();
+		const {
+			content,
+			type = 'text',
+			reply_to,      // NEW: message_id to reply to
+			caption,       // NEW: caption for media messages
+			secret_to      // NEW: user_id for secret messages (renamed from recipient_id)
+		} = await c.req.json();
 
 		if (!content) {
 			return c.json({ error: 'Message content is required' }, 400);
 		}
 
-		const message = await sendRoomMessage(roomId, user.id, content, type, recipient_id);
+		const message = await sendRoomMessage(
+			roomId,
+			user.id,
+			content,
+			type,
+			reply_to,    // pass as replyToMessageId
+			caption,     // pass as caption
+			secret_to    // pass as recipientId
+		);
+
 		return c.json({
 			message: 'Message sent',
 			data: message
@@ -150,6 +168,55 @@ rooms.get('/:roomId/members', async (c) => {
 			count: members.length,
 			members
 		});
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
+// React to room message - NEW ENDPOINT
+rooms.post('/:roomId/messages/:messageId/react', async (c) => {
+	try {
+		const user = c.get('user');
+		const roomId = c.req.param('roomId');
+		const messageId = c.req.param('messageId');
+		const { emoji } = await c.req.json();
+
+		if (!emoji) {
+			return c.json({ error: 'Emoji is required' }, 400);
+		}
+
+		const reaction = await reactToRoomMessage(messageId, user.id, emoji);
+		return c.json({
+			message: 'Reaction added',
+			data: reaction
+		}, 201);
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
+// Get reactions for room message - NEW ENDPOINT
+rooms.get('/:roomId/messages/:messageId/reactions', async (c) => {
+	try {
+		const messageId = c.req.param('messageId');
+		const reactions = await getRoomMessageReactions(messageId);
+		return c.json({
+			count: reactions.length,
+			reactions
+		});
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
+// Remove reaction from room message - NEW ENDPOINT
+rooms.delete('/:roomId/reactions/:reactionId', async (c) => {
+	try {
+		const user = c.get('user');
+		const reactionId = c.req.param('reactionId');
+
+		const result = await removeRoomMessageReaction(reactionId, user.id);
+		return c.json(result);
 	} catch (error) {
 		return c.json({ error: error.message }, 400);
 	}
