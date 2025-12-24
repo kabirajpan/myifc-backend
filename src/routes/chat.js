@@ -6,7 +6,8 @@ import {
 	getUserChats,
 	markMessagesAsRead,
 	getChatSession,
-	cleanupOldChats
+	cleanupOldChats,
+	deleteMessage
 } from '../services/chat.service.js';
 import { authMiddleware } from '../middleware/auth.js';
 
@@ -20,7 +21,6 @@ chat.get('/sessions', async (c) => {
 	try {
 		const user = c.get('user');
 		const chats = await getUserChats(user.id);
-
 		return c.json({
 			count: chats.length,
 			chats
@@ -45,7 +45,6 @@ chat.post('/sessions', async (c) => {
 		}
 
 		const session = await createOrGetChatSession(user.id, other_user_id);
-
 		return c.json({
 			message: 'Chat session created/retrieved',
 			session
@@ -60,7 +59,6 @@ chat.get('/sessions/:sessionId', async (c) => {
 	try {
 		const sessionId = c.req.param('sessionId');
 		const session = await getChatSession(sessionId);
-
 		return c.json({ session });
 	} catch (error) {
 		return c.json({ error: error.message }, 404);
@@ -72,9 +70,7 @@ chat.get('/messages/:sessionId', async (c) => {
 	try {
 		const user = c.get('user');
 		const sessionId = c.req.param('sessionId');
-
 		const messages = await getMessages(sessionId, user.id);
-
 		return c.json({
 			count: messages.length,
 			messages
@@ -88,13 +84,19 @@ chat.get('/messages/:sessionId', async (c) => {
 chat.post('/messages', async (c) => {
 	try {
 		const user = c.get('user');
-		const { session_id, content, type = 'text', reply_to_message_id } = await c.req.json();
+		const { session_id, content, type = 'text', reply_to_message_id, caption } = await c.req.json();
 
 		if (!session_id || !content) {
 			return c.json({ error: 'session_id and content are required' }, 400);
 		}
 
-		const message = await sendMessage(session_id, user.id, content, type, reply_to_message_id);
+		// Validate message type
+		const validTypes = ['text', 'image', 'gif', 'audio'];
+		if (!validTypes.includes(type)) {
+			return c.json({ error: 'Invalid message type' }, 400);
+		}
+
+		const message = await sendMessage(session_id, user.id, content, type, reply_to_message_id, caption); // ✅ Pass caption
 
 		return c.json({
 			message: 'Message sent',
@@ -105,14 +107,25 @@ chat.post('/messages', async (c) => {
 	}
 });
 
+// Delete a message (media only)
+chat.delete('/messages/:messageId', async (c) => {
+	try {
+		const user = c.get('user');
+		const messageId = c.req.param('messageId');
+
+		const result = await deleteMessage(messageId, user.id);
+		return c.json(result);
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
 // Mark messages as read
 chat.put('/messages/read/:sessionId', async (c) => {
 	try {
 		const user = c.get('user');
 		const sessionId = c.req.param('sessionId');
-
 		const result = await markMessagesAsRead(sessionId, user.id);
-
 		return c.json(result);
 	} catch (error) {
 		return c.json({ error: error.message }, 400);

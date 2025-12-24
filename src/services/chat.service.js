@@ -1,9 +1,26 @@
 import { db } from '../config/db.js';
 import { generateId } from '../utils/idGenerator.js';
 import { broadcastNewMessage } from './websocket.service.js';
+import { extractPublicIdFromUrl, getSignedMediaUrl, isPublicId } from './media.service.js';
+import { deleteMedia, deleteMultipleMedia } from '../utils/mediaProcessor.js';
+import { sendToUser } from './websocket.service.js';
 
 // Create or get existing chat session
 export async function createOrGetChatSession(user1_id, user2_id) {
+	// Check if other user is online
+	const otherUserResult = await db.execute({
+		sql: 'SELECT is_online FROM users WHERE id = ?',
+		args: [user2_id]
+	});
+
+	if (otherUserResult.rows.length === 0) {
+		throw new Error('User not found');
+	}
+
+	if (!otherUserResult.rows[0].is_online) {
+		throw new Error('User is offline. Cannot send message.');
+	}
+
 	// Sort user IDs to maintain consistency (always store smaller ID as user1)
 	const [userId1, userId2] = [user1_id, user2_id].sort();
 
@@ -42,7 +59,7 @@ export async function createOrGetChatSession(user1_id, user2_id) {
 }
 
 // Send a message
-export async function sendMessage(session_id, sender_id, content, type = 'text', reply_to_message_id = null) {
+export async function sendMessage(session_id, sender_id, content, type = 'text', reply_to_message_id = null, caption = null) {
 	const messageId = generateId();
 	const now = Date.now();
 
@@ -66,15 +83,35 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 		throw new Error('Sender is not part of this chat session');
 	}
 
+	// Check if other user is online
+	const otherUserId = isUser1 ? session.user2_id : session.user1_id;
+	const otherUserResult = await db.execute({
+		sql: 'SELECT is_online FROM users WHERE id = ?',
+		args: [otherUserId]
+	});
+
+	if (otherUserResult.rows.length === 0 || !otherUserResult.rows[0].is_online) {
+		throw new Error('User is offline. Cannot send message.');
+	}
+
 	// Check if the other user has logged out
 	const visibleToUser1 = isUser1 ? true : !session.user1_logged_out;
 	const visibleToUser2 = isUser2 ? true : !session.user2_logged_out;
 
-	// INSERT with reply_to_message_id
+	// For media messages, store public_id instead of URL
+	let contentToStore = content;
+	if (['image', 'gif', 'audio'].includes(type)) {
+		// If content is a URL, extract public_id
+		if (!isPublicId(content)) {
+			contentToStore = extractPublicIdFromUrl(content);
+		}
+	}
+
+	// INSERT with caption support
 	await db.execute({
-		sql: `INSERT INTO messages (id, session_id, sender_id, content, type, created_at, visible_to_user1, visible_to_user2, reply_to_message_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		args: [messageId, session_id, sender_id, content, type, now, visibleToUser1 ? 1 : 0, visibleToUser2 ? 1 : 0, reply_to_message_id]
+		sql: `INSERT INTO messages (id, session_id, sender_id, content, type, caption, created_at, visible_to_user1, visible_to_user2, reply_to_message_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		args: [messageId, session_id, sender_id, contentToStore, type, caption, now, visibleToUser1 ? 1 : 0, visibleToUser2 ? 1 : 0, reply_to_message_id]
 	});
 
 	// Reset logout flags when new message is sent (reactivate chat)
@@ -99,23 +136,105 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 	const senderUsername = senderResult.rows[0]?.username || 'Unknown';
 	const senderGender = senderResult.rows[0]?.gender || null;
 
+	// Generate signed URL for media messages
+	let displayContent = contentToStore;
+	if (['image', 'gif', 'audio'].includes(type)) {
+		displayContent = getSignedMediaUrl(contentToStore, type);
+	}
+
+	// Fetch reply message details if replying
+	let replyDetails = null;
+	if (reply_to_message_id) {
+		const replyResult = await db.execute({
+			sql: `SELECT m.content, m.type, m.created_at, u.username, u.gender 
+          FROM messages m
+          JOIN users u ON m.sender_id = u.id
+          WHERE m.id = ?`,
+			args: [reply_to_message_id]
+		});
+
+		if (replyResult.rows.length > 0) {
+			const reply = replyResult.rows[0];
+
+			// Generate signed URL if reply is media
+			let replyContent = reply.content;
+			if (['image', 'gif', 'audio'].includes(reply.type)) {
+				replyContent = getSignedMediaUrl(reply.content, reply.type);
+			}
+
+			replyDetails = {
+				reply_to_message_content: replyContent,
+				reply_to_message_sender: reply.username,
+				reply_to_message_gender: reply.gender,
+				reply_to_message_time: reply.created_at,
+				reply_to_message_type: reply.type
+			};
+		}
+	}
+
 	const messageData = {
 		id: messageId,
 		session_id,
 		sender_id,
 		sender_username: senderUsername,
 		sender_gender: senderGender,
-		content,
+		content: displayContent,
 		type,
+		caption: caption,
 		created_at: now,
 		is_read: false,
-		reply_to_message_id: reply_to_message_id
+		reply_to_message_id: reply_to_message_id,
+		...(replyDetails || {})  // ✅ Spread reply details
 	};
 
 	// Broadcast to other user via WebSocket
 	broadcastNewMessage(session, messageData, senderUsername);
 
 	return messageData;
+}
+
+// Delete a message (media only)
+export async function deleteMessage(message_id, user_id) {
+	try {
+		// Get message details
+		const messageResult = await db.execute({
+			sql: 'SELECT * FROM messages WHERE id = ?',
+			args: [message_id]
+		});
+
+		if (messageResult.rows.length === 0) {
+			throw new Error('Message not found');
+		}
+
+		const message = messageResult.rows[0];
+
+		// Check if user is the sender
+		if (message.sender_id !== user_id) {
+			throw new Error('You can only delete your own messages');
+		}
+
+		// Check if message is media type
+		if (!['image', 'gif', 'audio'].includes(message.type)) {
+			throw new Error('Only media messages can be deleted');
+		}
+
+		// Content is stored as public_id
+		const publicId = message.content;
+
+		// Delete from Cloudinary
+		await deleteMedia(publicId, message.type);
+
+		// Delete from database
+		await db.execute({
+			sql: 'DELETE FROM messages WHERE id = ?',
+			args: [message_id]
+		});
+
+		return { message: 'Message deleted successfully' };
+	} catch (error) {
+		console.error('Delete message error:', error);
+		throw error;
+	}
 }
 
 // Get messages for a specific user in a chat session
@@ -141,13 +260,13 @@ export async function getMessages(session_id, user_id) {
 	// Get messages visible to this user
 	const visibilityField = isUser1 ? 'visible_to_user1' : 'visible_to_user2';
 
-	// UPDATED: Get reply message details with LEFT JOIN
 	const result = await db.execute({
 		sql: `SELECT 
 			  m.*, 
 			  u.username as sender_username, 
 			  u.gender as sender_gender,
 			  reply_msg.content as reply_to_message_content,
+			  reply_msg.type as reply_to_message_type,
 			  reply_user.username as reply_to_message_sender,
 			  reply_user.gender as reply_to_message_gender,
 			  reply_msg.created_at as reply_to_message_time
@@ -160,7 +279,22 @@ export async function getMessages(session_id, user_id) {
 		args: [session_id]
 	});
 
-	return result.rows;
+	// Generate signed URLs for media messages
+	const messages = result.rows.map(msg => {
+		// Generate signed URL for main message if it's media
+		if (['image', 'gif', 'audio'].includes(msg.type)) {
+			msg.content = getSignedMediaUrl(msg.content, msg.type);
+		}
+
+		// Generate signed URL for replied message if it's media
+		if (msg.reply_to_message_content && ['image', 'gif', 'audio'].includes(msg.reply_to_message_type)) {
+			msg.reply_to_message_content = getSignedMediaUrl(msg.reply_to_message_content, msg.reply_to_message_type);
+		}
+
+		return msg;
+	});
+
+	return messages;
 }
 
 // Get all active chat sessions for a user
@@ -174,6 +308,7 @@ export async function getUserChats(user_id) {
               u1.is_online as user1_online,
               u2.is_online as user2_online,
               (SELECT content FROM messages WHERE session_id = cs.id ORDER BY created_at DESC LIMIT 1) as last_message,
+              (SELECT type FROM messages WHERE session_id = cs.id ORDER BY created_at DESC LIMIT 1) as last_message_type,
               (SELECT created_at FROM messages WHERE session_id = cs.id ORDER BY created_at DESC LIMIT 1) as last_message_time,
               (SELECT COUNT(*) FROM messages WHERE session_id = cs.id AND is_read = 0 AND sender_id != ?) as unread_count
               FROM chat_sessions cs
@@ -187,13 +322,28 @@ export async function getUserChats(user_id) {
 	// Format the response to show the "other" user's info
 	return result.rows.map(chat => {
 		const isUser1 = chat.user1_id === user_id;
+
+		// Format last message preview for media
+		let lastMessage = chat.last_message;
+		if (chat.last_message && ['image', 'gif', 'audio'].includes(chat.last_message_type)) {
+			// Show clean media type label
+			if (chat.last_message_type === 'image') {
+				lastMessage = 'Image';
+			} else if (chat.last_message_type === 'gif') {
+				lastMessage = 'GIF';
+			} else if (chat.last_message_type === 'audio') {
+				lastMessage = 'Voice message';
+			}
+		}
+
 		return {
 			session_id: chat.id,
 			other_user_id: isUser1 ? chat.user2_id : chat.user1_id,
 			other_user_name: isUser1 ? chat.user2_username : chat.user1_username,
 			other_user_gender: isUser1 ? chat.user2_gender : chat.user1_gender,
 			other_user_online: isUser1 ? chat.user2_online : chat.user1_online,
-			last_message: chat.last_message,
+			last_message: lastMessage,
+			last_message_type: chat.last_message_type,
 			last_message_time: chat.last_message_time,
 			unread_count: chat.unread_count,
 			created_at: chat.created_at
@@ -203,6 +353,14 @@ export async function getUserChats(user_id) {
 
 // Mark messages as read
 export async function markMessagesAsRead(session_id, user_id) {
+	// First, get the messages that will be marked as read
+	const unreadMessages = await db.execute({
+		sql: `SELECT id, sender_id FROM messages 
+              WHERE session_id = ? AND sender_id != ? AND is_read = 0`,
+		args: [session_id, user_id]
+	});
+
+	// Mark them as read in database
 	await db.execute({
 		sql: `UPDATE messages 
               SET is_read = 1 
@@ -210,10 +368,19 @@ export async function markMessagesAsRead(session_id, user_id) {
 		args: [session_id, user_id]
 	});
 
+	// ✅ Broadcast read receipt to each sender via WebSocket
+	for (const msg of unreadMessages.rows) {
+		sendToUser(msg.sender_id, {
+			type: 'message_read',
+			message_id: msg.id,
+			session_id: session_id
+		});
+	}
+
 	return { message: 'Messages marked as read' };
 }
 
-// Handle user logout - hide messages from user's view
+// Handle user logout - hide messages from user's view + delete media
 export async function handleUserLogout(user_id) {
 	// Get all active sessions for this user
 	const sessions = await db.execute({
@@ -225,6 +392,14 @@ export async function handleUserLogout(user_id) {
 	for (const session of sessions.rows) {
 		const isUser1 = session.user1_id === user_id;
 		const visibilityField = isUser1 ? 'visible_to_user1' : 'visible_to_user2';
+
+		// Get all media messages in this session that are visible to this user
+		const mediaMessages = await db.execute({
+			sql: `SELECT id, content, type FROM messages 
+                  WHERE session_id = ? AND ${visibilityField} = 1 
+                  AND type IN ('image', 'gif', 'audio')`,
+			args: [session.id]
+		});
 
 		// Hide all messages in this session from this user
 		await db.execute({
@@ -238,7 +413,32 @@ export async function handleUserLogout(user_id) {
 		const otherUserLoggedOut = isUser1 ? session.user2_logged_out : session.user1_logged_out;
 
 		if (otherUserLoggedOut) {
-			// Both logged out - delete the entire session
+			// Both logged out - delete media from Cloudinary
+			if (mediaMessages.rows.length > 0) {
+				// Group by media type
+				const imageIds = [];
+				const audioIds = [];
+
+				mediaMessages.rows.forEach(msg => {
+					// Content is stored as public_id
+					const publicId = msg.content;
+					if (msg.type === 'audio') {
+						audioIds.push(publicId);
+					} else {
+						imageIds.push(publicId);
+					}
+				});
+
+				// Delete from Cloudinary
+				if (imageIds.length > 0) {
+					await deleteMultipleMedia(imageIds, 'image');
+				}
+				if (audioIds.length > 0) {
+					await deleteMultipleMedia(audioIds, 'audio');
+				}
+			}
+
+			// Delete the entire session
 			await db.execute({
 				sql: 'DELETE FROM chat_sessions WHERE id = ?',
 				args: [session.id]
@@ -247,10 +447,41 @@ export async function handleUserLogout(user_id) {
 	}
 }
 
-// Cleanup old chats (24+ hours)
+// Cleanup old chats (24+ hours) + delete media
 export async function cleanupOldChats() {
 	const now = Date.now();
 	const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
+
+	// Get all old media messages before deleting
+	const oldMediaMessages = await db.execute({
+		sql: `SELECT id, content, type FROM messages 
+              WHERE created_at < ? AND type IN ('image', 'gif', 'audio')`,
+		args: [twentyFourHoursAgo]
+	});
+
+	// Delete media from Cloudinary
+	if (oldMediaMessages.rows.length > 0) {
+		const imageIds = [];
+		const audioIds = [];
+
+		oldMediaMessages.rows.forEach(msg => {
+			// Content is stored as public_id
+			const publicId = msg.content;
+			if (msg.type === 'audio') {
+				audioIds.push(publicId);
+			} else {
+				imageIds.push(publicId);
+			}
+		});
+
+		// Delete from Cloudinary
+		if (imageIds.length > 0) {
+			await deleteMultipleMedia(imageIds, 'image');
+		}
+		if (audioIds.length > 0) {
+			await deleteMultipleMedia(audioIds, 'audio');
+		}
+	}
 
 	// Delete messages older than 24 hours
 	await db.execute({
@@ -264,7 +495,10 @@ export async function cleanupOldChats() {
 		args: [now]
 	});
 
-	return { message: 'Old chats cleaned up' };
+	return {
+		message: 'Old chats cleaned up',
+		deleted_messages: oldMediaMessages.rows.length
+	};
 }
 
 // Get chat session details

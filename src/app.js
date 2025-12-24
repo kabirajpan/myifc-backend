@@ -4,7 +4,8 @@ import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import friends from './routes/friends.js';
 import rooms from './routes/rooms.js';
-import admin from './routes/admin.js';  // ADD THIS
+import admin from './routes/admin.js';
+import media from './routes/media.js';  // NEW: Media routes
 
 const app = new Hono();
 
@@ -30,6 +31,7 @@ app.route('/api/auth', authRoutes);
 app.route('/api/chat', chatRoutes);
 app.route('/api/friends', friends);
 app.route('/api/rooms', rooms);
-app.route('/api/admin', admin);  // ADD THIS
+app.route('/api/admin', admin);
+app.route('/api/media', media);  // NEW: Media upload routes
 
 export default app;
