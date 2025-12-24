@@ -146,7 +146,7 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 	let replyDetails = null;
 	if (reply_to_message_id) {
 		const replyResult = await db.execute({
-			sql: `SELECT m.content, m.type, m.created_at, u.username, u.gender 
+			sql: `SELECT m.content, m.type, m.created_at, m.caption, u.username, u.gender 
           FROM messages m
           JOIN users u ON m.sender_id = u.id
           WHERE m.id = ?`,
@@ -167,7 +167,8 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 				reply_to_message_sender: reply.username,
 				reply_to_message_gender: reply.gender,
 				reply_to_message_time: reply.created_at,
-				reply_to_message_type: reply.type
+				reply_to_message_type: reply.type,
+				reply_to_message_caption: reply.caption || null
 			};
 		}
 	}
@@ -267,6 +268,7 @@ export async function getMessages(session_id, user_id) {
 			  u.gender as sender_gender,
 			  reply_msg.content as reply_to_message_content,
 			  reply_msg.type as reply_to_message_type,
+				reply_msg.caption as reply_to_message_caption,
 			  reply_user.username as reply_to_message_sender,
 			  reply_user.gender as reply_to_message_gender,
 			  reply_msg.created_at as reply_to_message_time
