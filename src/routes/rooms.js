@@ -3,6 +3,7 @@ import {
 	createRoom,
 	getAllRooms,
 	getPublicRooms,
+	getUserJoinedRooms,
 	getRoomById,
 	joinRoom,
 	leaveRoom,
@@ -39,6 +40,21 @@ rooms.use('/*', authMiddleware);
 rooms.get('/', async (c) => {
 	try {
 		const roomsList = await getAllRooms();
+		return c.json({
+			count: roomsList.length,
+			rooms: roomsList
+		});
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
+
+// Get user's joined rooms
+rooms.get('/user', async (c) => {
+	try {
+		const user = c.get('user');
+		const roomsList = await getUserJoinedRooms(user.id);
 		return c.json({
 			count: roomsList.length,
 			rooms: roomsList

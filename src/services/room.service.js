@@ -79,6 +79,24 @@ export async function getPublicRooms() {
 	return result.rows;
 }
 
+// Get user's joined rooms
+export async function getUserJoinedRooms(userId) {
+	const result = await db.execute({
+		sql: `SELECT r.*, 
+              u.username as creator_username,
+              (SELECT COUNT(*) FROM room_members WHERE room_id = r.id) as member_count,
+              1 as has_joined
+              FROM rooms r
+              JOIN users u ON r.creator_id = u.id
+              JOIN room_members rm ON r.id = rm.room_id
+              WHERE rm.user_id = ? AND r.is_active = 1
+              ORDER BY r.is_admin_room DESC, r.created_at DESC`,
+		args: [userId]
+	});
+
+	return result.rows;
+}
+
 // Get room by ID with timer info
 export async function getRoomById(roomId) {
 	const result = await db.execute({
