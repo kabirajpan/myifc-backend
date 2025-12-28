@@ -9,6 +9,8 @@ import {
 	leaveRoom,
 	sendRoomMessage,
 	getRoomMessages,
+	getNewMessages,
+	getMessageCount,
 	getRoomMembers,
 	deleteRoom,
 	deleteExpiredRooms,
@@ -158,14 +160,38 @@ rooms.post('/:roomId/messages', async (c) => {
 	}
 });
 
-// Get room messages
+// Get message count for a room (for pagination)
+rooms.get('/:roomId/messages/count', async (c) => {
+	try {
+		const roomId = c.req.param('roomId');
+		const count = await getMessageCount(roomId);
+		return c.json({ count });
+	} catch (error) {
+		return c.json({ error: error.message }, 400);
+	}
+});
+
+// Get room messages (supports pagination and incremental updates)
 rooms.get('/:roomId/messages', async (c) => {
 	try {
 		const user = c.get('user');
 		const roomId = c.req.param('roomId');
 		const limit = parseInt(c.req.query('limit') || '100');
+		const offset = parseInt(c.req.query('offset') || '0');
+		const afterTimestamp = c.req.query('after_timestamp'); // ✅ NEW
 
-		const messages = await getRoomMessages(roomId, user.id, limit);
+		let messages;
+
+		if (afterTimestamp) {
+			// ✅ Incremental update: Get only new messages after timestamp
+			const timestamp = parseInt(afterTimestamp);
+			messages = await getNewMessages(roomId, user.id, timestamp);
+			console.log(`📥 Fetched ${messages.length} new messages after ${timestamp}`);
+		} else {
+			// Normal pagination
+			messages = await getRoomMessages(roomId, user.id, limit, offset);
+		}
+
 		return c.json({
 			count: messages.length,
 			messages
@@ -174,6 +200,7 @@ rooms.get('/:roomId/messages', async (c) => {
 		return c.json({ error: error.message }, 400);
 	}
 });
+
 
 // Get room members
 rooms.get('/:roomId/members', async (c) => {

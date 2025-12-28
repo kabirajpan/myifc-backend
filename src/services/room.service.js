@@ -332,6 +332,38 @@ export async function sendRoomMessage(
 		// Don't fail the message send if WebSocket fails
 	}
 
+	try {
+		const room = await getRoomById(roomId);
+
+		if (room.is_admin_room) {
+			// Admin rooms: Delete messages older than 24 hours
+			const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+			await db.execute({
+				sql: 'DELETE FROM room_messages WHERE room_id = ? AND created_at < ?',
+				args: [roomId, twentyFourHoursAgo]
+			});
+			console.log(`🗑️ Cleaned up old messages in admin room ${roomId}`);
+		} else {
+			// User rooms: Keep max 200 messages
+			const count = await getMessageCount(roomId);
+			if (count > 200) {
+				const deleteCount = count - 200;
+				// Delete oldest messages
+				await db.execute({
+					sql: `DELETE FROM room_messages 
+					      WHERE room_id = ? 
+					      ORDER BY created_at ASC 
+					      LIMIT ?`,
+					args: [roomId, deleteCount]
+				});
+				console.log(`🗑️ Deleted ${deleteCount} old messages from room ${roomId}`);
+			}
+		}
+	} catch (cleanupError) {
+		console.error('❌ Cleanup error (non-fatal):', cleanupError);
+		// Don't fail message send if cleanup fails
+	}
+
 	return {
 		id: messageId,
 		room_id: roomId,
@@ -359,7 +391,7 @@ export async function sendRoomMessage(
 }
 
 // Get room messages (filter secret messages based on user) - UPDATED with reply data AND reactions
-export async function getRoomMessages(roomId, userId, limit = 100) {
+export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
 	const result = await db.execute({
 		sql: `SELECT rm.*, 
           u1.username as sender_username,
@@ -380,8 +412,100 @@ export async function getRoomMessages(roomId, userId, limit = 100) {
           LEFT JOIN users u3 ON rm2.sender_id = u3.id
           WHERE rm.room_id = ?
           ORDER BY rm.created_at DESC
-          LIMIT ?`,
-		args: [roomId, limit]
+          LIMIT ? OFFSET ?`,
+		args: [roomId, limit, offset]
+	});
+	// Filter messages - only show secret messages to sender and recipient
+	const filteredMessages = result.rows.filter(msg => {
+		if (msg.type === 'secret') {
+			return msg.sender_id === userId || msg.recipient_id === userId;
+		}
+		return true;
+	});
+
+	// ✅ ROOT FIX: Batch fetch ALL reactions in ONE query instead of 100+ queries
+	const messageIds = filteredMessages.map(m => m.id);
+
+	let allReactions = [];
+	if (messageIds.length > 0) {
+		// Create placeholders for SQL IN clause
+		const placeholders = messageIds.map(() => '?').join(',');
+
+		const reactionsResult = await db.execute({
+			sql: `SELECT rmr.*, u.username, u.gender
+          FROM room_message_reactions rmr
+          JOIN users u ON rmr.user_id = u.id
+          WHERE rmr.message_id IN (${placeholders})
+          ORDER BY rmr.created_at ASC`,
+			args: messageIds
+		});
+
+		allReactions = reactionsResult.rows || [];
+		console.log(`✅ Fetched ${allReactions.length} reactions in 1 query for ${messageIds.length} messages`);
+	}
+
+	// Group reactions by message_id for fast lookup
+	const reactionsByMessage = {};
+	allReactions.forEach(reaction => {
+		if (!reactionsByMessage[reaction.message_id]) {
+			reactionsByMessage[reaction.message_id] = [];
+		}
+		reactionsByMessage[reaction.message_id].push(reaction);
+	});
+
+	// Process messages with their reactions
+	const messagesWithReactions = filteredMessages.map(msg => {
+		// Convert main message content to signed URL if it's media
+		if (['image', 'gif', 'audio'].includes(msg.type)) {
+			try {
+				msg.content = getSignedMediaUrl(msg.content, msg.type);
+			} catch (error) {
+				console.error('Failed to generate signed URL for message:', msg.id, error);
+			}
+		}
+
+		// Convert reply message content to signed URL if it's media
+		if (msg.reply_to_message_id && ['image', 'gif', 'audio'].includes(msg.reply_to_message_type)) {
+			try {
+				msg.reply_to_message_content = getSignedMediaUrl(msg.reply_to_message_content, msg.reply_to_message_type);
+			} catch (error) {
+				console.error('Failed to generate signed URL for reply message:', msg.reply_to_message_id, error);
+			}
+		}
+
+		return {
+			...msg,
+			reactions: reactionsByMessage[msg.id] || []
+		};
+	});
+
+	return messagesWithReactions.reverse();
+}
+
+
+// Get new messages after a specific timestamp (for cache updates)
+export async function getNewMessages(roomId, userId, afterTimestamp) {
+	const result = await db.execute({
+		sql: `SELECT rm.*, 
+          u1.username as sender_username,
+          u1.gender as sender_gender,
+          u2.username as recipient_username,
+          u2.gender as recipient_gender,
+          -- Get reply message data if exists
+          rm2.content as reply_to_message_content,
+          rm2.type as reply_to_message_type,
+          rm2.caption as reply_to_message_caption,
+          rm2.created_at as reply_to_message_time,
+          u3.username as reply_to_message_sender,
+          u3.gender as reply_to_message_gender
+          FROM room_messages rm
+          JOIN users u1 ON rm.sender_id = u1.id
+          LEFT JOIN users u2 ON rm.recipient_id = u2.id
+          LEFT JOIN room_messages rm2 ON rm.reply_to_message_id = rm2.id
+          LEFT JOIN users u3 ON rm2.sender_id = u3.id
+          WHERE rm.room_id = ? AND rm.created_at > ?
+          ORDER BY rm.created_at ASC`,
+		args: [roomId, afterTimestamp]
 	});
 
 	// Filter messages - only show secret messages to sender and recipient
@@ -392,10 +516,9 @@ export async function getRoomMessages(roomId, userId, limit = 100) {
 		return true;
 	});
 
-	// ✅ ADD THIS: Fetch reactions for all messages
+	// Fetch reactions for all messages
 	const messagesWithReactions = await Promise.all(
 		filteredMessages.map(async (msg) => {
-			// Get reactions for this message
 			const reactionsResult = await db.execute({
 				sql: `SELECT rmr.*, u.username, u.gender
 				      FROM room_message_reactions rmr
@@ -430,7 +553,18 @@ export async function getRoomMessages(roomId, userId, limit = 100) {
 		})
 	);
 
-	return messagesWithReactions.reverse();
+	return messagesWithReactions;
+}
+
+
+// Get total message count for a room (for pagination)
+export async function getMessageCount(roomId) {
+	const result = await db.execute({
+		sql: 'SELECT COUNT(*) as count FROM room_messages WHERE room_id = ?',
+		args: [roomId]
+	});
+
+	return result.rows[0]?.count || 0;
 }
 
 // Get room members
