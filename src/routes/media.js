@@ -11,10 +11,11 @@ media.use('/*', authMiddleware);
 media.post('/upload', async (c) => {
 	try {
 		const user = c.get('user');
-		const body = await c.req.parseBody();
 
-		const file = body.file;
-		const mediaType = body.type; // 'image', 'gif', or 'audio'
+		// ✅ FIX: use formData() to parse multipart uploads
+		const formData = await c.req.formData();
+		const file = formData.get('file');
+		const mediaType = formData.get('type'); // 'image', 'gif', or 'audio'
 
 		if (!file) {
 			return c.json({ error: 'No file provided' }, 400);
@@ -31,6 +32,7 @@ media.post('/upload', async (c) => {
 			message: 'Media uploaded successfully',
 			data: {
 				public_id: result.data.public_id, // Return public_id (NOT URL)
+				url: result.data.url,              // GIFs may have public URL
 				format: result.data.format,
 				size: result.data.size,
 				duration: result.data.duration,

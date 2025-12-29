@@ -2,50 +2,43 @@ import { validateMedia } from '../utils/mediaValidator.js';
 import { uploadImage, uploadGif, uploadAudio, deleteMedia } from '../utils/mediaProcessor.js';
 import { generateSignedUrl } from '../config/cloudinary.js';
 
-// Upload media based on type
+
+// media.service.js
 export async function uploadMediaFile(file, mediaType, userId) {
-	try {
-		// Validate file
-		const validation = validateMedia(file, mediaType);
-		if (!validation.valid) {
-			throw new Error(validation.errors.join(', '));
-		}
+	const validation = validateMedia(file, mediaType);
+	if (!validation.valid) throw new Error(validation.errors.join(', '));
 
-		// Convert file to buffer
-		const buffer = Buffer.from(await file.arrayBuffer());
+	const buffer = Buffer.from(await file.arrayBuffer());
 
-		// Upload based on type
-		let result;
-		switch (mediaType) {
-			case 'image':
-				result = await uploadImage(buffer, userId);
-				break;
-			case 'gif':
-				result = await uploadGif(buffer, userId);
-				break;
-			case 'audio':
-				result = await uploadAudio(buffer, userId);
-				break;
-			default:
-				throw new Error('Invalid media type');
-		}
-
-		// Store public_id instead of URL (we'll generate signed URLs when fetching)
-		return {
-			success: true,
-			data: {
-				public_id: result.public_id, // Store this in DB
-				format: result.format,
-				size: result.size,
-				duration: result.duration || null,
-				type: mediaType
-			}
-		};
-	} catch (error) {
-		console.error('Media upload service error:', error);
-		throw error;
+	let result;
+	switch (mediaType) {
+		case 'image':
+			result = await uploadImage(buffer, userId);
+			break;
+		case 'gif':
+			result = await uploadGif(buffer, userId);
+			break;
+		case 'audio':
+			result = await uploadAudio(buffer, userId);
+			break;
+		default:
+			throw new Error('Invalid media type');
 	}
+
+	// **Important:** for GIF, return URL directly
+	return {
+		success: true,
+		data: {
+			public_id: result.public_id,
+			url: mediaType === 'gif' ? result.url : undefined, // GIF uses public URL
+			format: result.format,
+			size: result.size,
+			duration: result.duration || null,
+			type: mediaType
+		}
+	};
 }
+
 
 // Delete media file from Cloudinary
 export async function deleteMediaFile(publicId, mediaType) {
