@@ -31,6 +31,76 @@ export function broadcastNewMessage(session, message, senderUsername) {
 	});
 }
 
+// ✅ NEW: Broadcast reaction to P2P chat participant
+export async function broadcastChatReaction(sessionId, reaction, messageId) {
+	// Get session details
+	const sessionResult = await db.execute({
+		sql: 'SELECT user1_id, user2_id FROM chat_sessions WHERE id = ?',
+		args: [sessionId]
+	});
+
+	if (sessionResult.rows.length === 0) {
+		console.error('Session not found for reaction broadcast');
+		return 0;
+	}
+
+	const session = sessionResult.rows[0];
+
+	// Send to the other user (not the one who reacted)
+	const recipientId = session.user1_id === reaction.user_id
+		? session.user2_id
+		: session.user1_id;
+
+	if (sendToUser(recipientId, {
+		type: 'message_reacted',
+		data: {
+			session_id: sessionId,
+			message_id: messageId,
+			reaction
+		}
+	})) {
+		console.log(`🎭 Broadcast P2P reaction to user ${recipientId}`);
+		return 1;
+	}
+
+	return 0;
+}
+
+// ✅ NEW: Broadcast reaction removal to P2P chat participant
+export async function broadcastChatReactionRemoval(sessionId, reactionId, messageId, userId) {
+	// Get session details
+	const sessionResult = await db.execute({
+		sql: 'SELECT user1_id, user2_id FROM chat_sessions WHERE id = ?',
+		args: [sessionId]
+	});
+
+	if (sessionResult.rows.length === 0) {
+		console.error('Session not found for reaction removal broadcast');
+		return 0;
+	}
+
+	const session = sessionResult.rows[0];
+
+	// Send to the other user (not the one who removed)
+	const recipientId = session.user1_id === userId
+		? session.user2_id
+		: session.user1_id;
+
+	if (sendToUser(recipientId, {
+		type: 'reaction_removed',
+		data: {
+			session_id: sessionId,
+			message_id: messageId,
+			reaction_id: reactionId
+		}
+	})) {
+		console.log(`🗑️ Broadcast P2P reaction removal to user ${recipientId}`);
+		return 1;
+	}
+
+	return 0;
+}
+
 // Broadcast message to all room members (excluding sender)
 export async function broadcastRoomMessage(roomId, message, excludeUserId = null) {
 	// Get all room members
@@ -144,16 +214,6 @@ export async function broadcastRoomReactionRemoval(roomId, reactionId, messageId
 
 	console.log(`🗑️ Broadcast reaction removal to ${sentCount} room members`);
 	return sentCount;
-}
-
-// Broadcast reaction to private chat
-export function broadcastReaction(sessionId, reaction, messageId, excludeUserId = null) {
-	// Get session participants
-	const session = connections.get(sessionId); // This needs to get actual session from DB
-	// Implementation depends on how sessions are stored
-
-	console.log(`🎭 Broadcast reaction for message ${messageId}`);
-	return 0; // Placeholder - need session data
 }
 
 // Add connection

@@ -1,7 +1,11 @@
 import { db } from '../config/db.js';
 import { generateId } from '../utils/idGenerator.js';
-import { broadcastNewMessage } from './websocket.service.js';
-import { extractPublicIdFromUrl, getSignedMediaUrl, isPublicId } from './media.service.js';
+import {
+	broadcastNewMessage,
+	broadcastChatReaction,
+	broadcastChatReactionRemoval
+} from './websocket.service.js';
+import { extractPublicIdFromUrl, isPublicId } from './media.service.js';
 import { deleteMedia, deleteMultipleMedia } from '../utils/mediaProcessor.js';
 import { sendToUser } from './websocket.service.js';
 
@@ -98,10 +102,10 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 	const visibleToUser1 = isUser1 ? true : !session.user1_logged_out;
 	const visibleToUser2 = isUser2 ? true : !session.user2_logged_out;
 
-	// For media messages, store public_id instead of URL
+	// For media messages, store public_id or URL (now using public URLs)
 	let contentToStore = content;
 	if (['image', 'gif', 'audio'].includes(type)) {
-		// If content is a URL, extract public_id
+		// If content is a URL, extract public_id for storage
 		if (!isPublicId(content)) {
 			contentToStore = extractPublicIdFromUrl(content);
 		}
@@ -136,11 +140,8 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 	const senderUsername = senderResult.rows[0]?.username || 'Unknown';
 	const senderGender = senderResult.rows[0]?.gender || null;
 
-	// Generate signed URL for media messages
+	// Content is already a public URL or public_id
 	let displayContent = contentToStore;
-	if (['image', 'gif', 'audio'].includes(type)) {
-		displayContent = getSignedMediaUrl(contentToStore, type);
-	}
 
 	// Fetch reply message details if replying
 	let replyDetails = null;
@@ -156,11 +157,8 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 		if (replyResult.rows.length > 0) {
 			const reply = replyResult.rows[0];
 
-			// Generate signed URL if reply is media
+			// Content is already a public URL or public_id
 			let replyContent = reply.content;
-			if (['image', 'gif', 'audio'].includes(reply.type)) {
-				replyContent = getSignedMediaUrl(reply.content, reply.type);
-			}
 
 			replyDetails = {
 				reply_to_message_content: replyContent,
@@ -185,7 +183,7 @@ export async function sendMessage(session_id, sender_id, content, type = 'text',
 		created_at: now,
 		is_read: false,
 		reply_to_message_id: reply_to_message_id,
-		...(replyDetails || {})  // ✅ Spread reply details
+		...(replyDetails || {})
 	};
 
 	// Broadcast to other user via WebSocket
@@ -268,7 +266,7 @@ export async function getMessages(session_id, user_id) {
 			  u.gender as sender_gender,
 			  reply_msg.content as reply_to_message_content,
 			  reply_msg.type as reply_to_message_type,
-				reply_msg.caption as reply_to_message_caption,
+			  reply_msg.caption as reply_to_message_caption,
 			  reply_user.username as reply_to_message_sender,
 			  reply_user.gender as reply_to_message_gender,
 			  reply_msg.created_at as reply_to_message_time
@@ -281,22 +279,40 @@ export async function getMessages(session_id, user_id) {
 		args: [session_id]
 	});
 
-	// Generate signed URLs for media messages
-	const messages = result.rows.map(msg => {
-		// Generate signed URL for main message if it's media
-		if (['image', 'gif', 'audio'].includes(msg.type)) {
-			msg.content = getSignedMediaUrl(msg.content, msg.type);
-		}
+	// ✅ NEW: Fetch reactions for all messages (batch query like room chat)
+	const messageIds = result.rows.map(m => m.id);
+	let allReactions = [];
 
-		// Generate signed URL for replied message if it's media
-		if (msg.reply_to_message_content && ['image', 'gif', 'audio'].includes(msg.reply_to_message_type)) {
-			msg.reply_to_message_content = getSignedMediaUrl(msg.reply_to_message_content, msg.reply_to_message_type);
-		}
+	if (messageIds.length > 0) {
+		const placeholders = messageIds.map(() => '?').join(',');
+		const reactionsResult = await db.execute({
+			sql: `SELECT mr.*, u.username, u.gender
+			      FROM message_reactions mr
+			      JOIN users u ON mr.user_id = u.id
+			      WHERE mr.message_id IN (${placeholders})
+			      ORDER BY mr.created_at ASC`,
+			args: messageIds
+		});
+		allReactions = reactionsResult.rows || [];
+		console.log(`✅ Fetched ${allReactions.length} reactions in 1 query for ${messageIds.length} messages`);
+	}
 
-		return msg;
+	// Group reactions by message_id
+	const reactionsByMessage = {};
+	allReactions.forEach(reaction => {
+		if (!reactionsByMessage[reaction.message_id]) {
+			reactionsByMessage[reaction.message_id] = [];
+		}
+		reactionsByMessage[reaction.message_id].push(reaction);
 	});
 
-	return messages;
+	// ✅ Attach reactions to messages
+	const messagesWithReactions = result.rows.map(msg => ({
+		...msg,
+		reactions: reactionsByMessage[msg.id] || []
+	}));
+
+	return messagesWithReactions;
 }
 
 // Get all active chat sessions for a user
@@ -370,7 +386,7 @@ export async function markMessagesAsRead(session_id, user_id) {
 		args: [session_id, user_id]
 	});
 
-	// ✅ Broadcast read receipt to each sender via WebSocket
+	// Broadcast read receipt to each sender via WebSocket
 	for (const msg of unreadMessages.rows) {
 		sendToUser(msg.sender_id, {
 			type: 'message_read',
@@ -380,6 +396,111 @@ export async function markMessagesAsRead(session_id, user_id) {
 	}
 
 	return { message: 'Messages marked as read' };
+}
+
+// ✅ NEW: React to P2P message
+export async function reactToMessage(messageId, userId, emoji) {
+	// Check if message exists and user has access
+	const messageCheck = await db.execute({
+		sql: `SELECT m.session_id, m.sender_id, cs.user1_id, cs.user2_id
+		      FROM messages m
+		      JOIN chat_sessions cs ON m.session_id = cs.id
+		      WHERE m.id = ? AND cs.is_active = 1`,
+		args: [messageId]
+	});
+
+	if (messageCheck.rows.length === 0) {
+		throw new Error('Message not found');
+	}
+
+	const message = messageCheck.rows[0];
+
+	// Check if user is part of the chat session
+	if (message.user1_id !== userId && message.user2_id !== userId) {
+		throw new Error('You are not part of this chat session');
+	}
+
+	const reactionId = generateId();
+	const now = Date.now();
+
+	await db.execute({
+		sql: `INSERT INTO message_reactions (id, message_id, user_id, emoji, created_at)
+		      VALUES (?, ?, ?, ?, ?)`,
+		args: [reactionId, messageId, userId, emoji, now]
+	});
+
+	// Get user info for the reaction
+	const userResult = await db.execute({
+		sql: 'SELECT username, gender FROM users WHERE id = ?',
+		args: [userId]
+	});
+
+	const reaction = {
+		id: reactionId,
+		message_id: messageId,
+		user_id: userId,
+		username: userResult.rows[0]?.username,
+		gender: userResult.rows[0]?.gender,
+		emoji,
+		created_at: now
+	};
+
+	// Broadcast reaction via WebSocket
+	try {
+		await broadcastChatReaction(message.session_id, reaction, messageId);
+	} catch (wsError) {
+		console.error('WebSocket reaction broadcast failed:', wsError);
+	}
+
+	return reaction;
+}
+
+// ✅ NEW: Remove reaction from P2P message
+export async function removeMessageReaction(reactionId, userId) {
+	// Get reaction details to find session_id and message_id
+	const reactionCheck = await db.execute({
+		sql: `SELECT mr.message_id, m.session_id 
+		      FROM message_reactions mr
+		      JOIN messages m ON mr.message_id = m.id
+		      WHERE mr.id = ? AND mr.user_id = ?`,
+		args: [reactionId, userId]
+	});
+
+	if (reactionCheck.rows.length === 0) {
+		throw new Error('Reaction not found or you do not have permission to remove it');
+	}
+
+	const { message_id, session_id } = reactionCheck.rows[0];
+
+	// Delete the reaction
+	await db.execute({
+		sql: `DELETE FROM message_reactions 
+		      WHERE id = ? AND user_id = ?`,
+		args: [reactionId, userId]
+	});
+
+	// Broadcast removal via WebSocket
+	try {
+		await broadcastChatReactionRemoval(session_id, reactionId, message_id, userId);
+	} catch (wsError) {
+		console.error('WebSocket removal broadcast failed:', wsError);
+	}
+
+	return { message: 'Reaction removed' };
+}
+
+// ✅ NEW: Get reactions for a P2P message
+export async function getMessageReactions(messageId) {
+	const result = await db.execute({
+		sql: `SELECT mr.*, u.username, u.gender
+		      FROM message_reactions mr
+		      JOIN users u ON mr.user_id = u.id
+		      WHERE mr.message_id = ?
+		      ORDER BY mr.created_at DESC`,
+		args: [messageId]
+	});
+
+	return result.rows;
 }
 
 // Handle user logout - hide messages from user's view + delete media

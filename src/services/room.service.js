@@ -1,8 +1,6 @@
 import { db } from '../config/db.js';
 import { generateId } from '../utils/idGenerator.js';
 import { broadcastRoomMessage, broadcastRoomReaction, broadcastRoomPresence, broadcastRoomReactionRemoval } from './websocket.service.js';
-import { getSignedMediaUrl } from './media.service.js';
-
 
 // Create room (admin or registered user)
 export async function createRoom(creatorId, name, description, isAdminRoom = false) {
@@ -166,7 +164,6 @@ export async function joinRoom(roomId, userId) {
 		args: [memberId, roomId, userId, now]
 	});
 
-
 	const userResult = await db.execute({
 		sql: 'SELECT id, username, gender, is_guest FROM users WHERE id = ?',
 		args: [userId]
@@ -184,7 +181,6 @@ export async function joinRoom(roomId, userId) {
 	}
 
 	return { message: 'Joined room successfully' };
-
 }
 
 // Leave room
@@ -215,7 +211,7 @@ export async function leaveRoom(roomId, userId) {
 	return { message: 'Left room successfully' };
 }
 
-// Send message in room (including secret messages) - UPDATED with signed URLs
+// Send message in room (including secret messages)
 export async function sendRoomMessage(
 	roomId,
 	senderId,
@@ -243,7 +239,6 @@ export async function sendRoomMessage(
 	const messageId = generateId();
 	const now = Date.now();
 
-	// UPDATED INSERT with new columns
 	await db.execute({
 		sql: `INSERT INTO room_messages 
           (id, room_id, sender_id, recipient_id, content, type, created_at, is_read, caption, reply_to_message_id)
@@ -260,6 +255,7 @@ export async function sendRoomMessage(
 	// Get recipient username and gender if secret message
 	let recipientUsername = null;
 	let recipientGender = null;
+
 	if (recipientId) {
 		const recipientResult = await db.execute({
 			sql: 'SELECT username, gender FROM users WHERE id = ?',
@@ -280,28 +276,10 @@ export async function sendRoomMessage(
 			args: [replyToMessageId]
 		});
 		replyData = replyResult.rows[0];
-
-		// ✅ Convert reply message content to signed URL if it's media
-		if (replyData && ['image', 'gif', 'audio'].includes(replyData.type)) {
-			try {
-				replyData.content = getSignedMediaUrl(replyData.content, replyData.type);
-			} catch (error) {
-				console.error('Failed to generate signed URL for reply message:', error);
-			}
-		}
 	}
 
-	// ✅ Convert content to signed URL for media messages (for WebSocket broadcast and return)
-	let contentToSend = content;
-	if (['image', 'gif', 'audio'].includes(type)) {
-		try {
-			contentToSend = getSignedMediaUrl(content, type);
-		} catch (error) {
-			console.error('Failed to generate signed URL for message:', error);
-			// If URL generation fails, use original content (public_id)
-			contentToSend = content;
-		}
-	}
+	// Content is already a public URL, no need to convert
+	const contentToSend = content;
 
 	try {
 		await broadcastRoomMessage(roomId, {
@@ -313,12 +291,12 @@ export async function sendRoomMessage(
 			sender_gender: senderResult.rows[0]?.gender,
 			recipient_username: recipientUsername,
 			recipient_gender: recipientGender,
-			content: contentToSend, // ✅ Use signed URL
+			content: contentToSend,
 			type,
 			caption,
 			reply_to_message_id: replyToMessageId,
 			...(replyData && {
-				reply_to_message_content: replyData.content, // ✅ Already converted to signed URL above
+				reply_to_message_content: replyData.content,
 				reply_to_message_sender: replyData.username,
 				reply_to_message_gender: replyData.gender,
 				reply_to_message_time: replyData.created_at,
@@ -373,13 +351,13 @@ export async function sendRoomMessage(
 		sender_gender: senderResult.rows[0]?.gender,
 		recipient_username: recipientUsername,
 		recipient_gender: recipientGender,
-		content: contentToSend, // ✅ Return signed URL
+		content: contentToSend,
 		type,
 		caption,
 		reply_to_message_id: replyToMessageId,
 		// Add reply data if exists
 		...(replyData && {
-			reply_to_message_content: replyData.content, // ✅ Already converted to signed URL above
+			reply_to_message_content: replyData.content,
 			reply_to_message_sender: replyData.username,
 			reply_to_message_gender: replyData.gender,
 			reply_to_message_time: replyData.created_at,
@@ -390,7 +368,7 @@ export async function sendRoomMessage(
 	};
 }
 
-// Get room messages (filter secret messages based on user) - UPDATED with reply data AND reactions
+// Get room messages (filter secret messages based on user)
 export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
 	const result = await db.execute({
 		sql: `SELECT rm.*, 
@@ -415,6 +393,7 @@ export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
           LIMIT ? OFFSET ?`,
 		args: [roomId, limit, offset]
 	});
+
 	// Filter messages - only show secret messages to sender and recipient
 	const filteredMessages = result.rows.filter(msg => {
 		if (msg.type === 'secret') {
@@ -423,14 +402,13 @@ export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
 		return true;
 	});
 
-	// ✅ ROOT FIX: Batch fetch ALL reactions in ONE query instead of 100+ queries
+	// Batch fetch ALL reactions in ONE query instead of multiple queries
 	const messageIds = filteredMessages.map(m => m.id);
-
 	let allReactions = [];
+
 	if (messageIds.length > 0) {
 		// Create placeholders for SQL IN clause
 		const placeholders = messageIds.map(() => '?').join(',');
-
 		const reactionsResult = await db.execute({
 			sql: `SELECT rmr.*, u.username, u.gender
           FROM room_message_reactions rmr
@@ -439,7 +417,6 @@ export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
           ORDER BY rmr.created_at ASC`,
 			args: messageIds
 		});
-
 		allReactions = reactionsResult.rows || [];
 		console.log(`✅ Fetched ${allReactions.length} reactions in 1 query for ${messageIds.length} messages`);
 	}
@@ -455,24 +432,7 @@ export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
 
 	// Process messages with their reactions
 	const messagesWithReactions = filteredMessages.map(msg => {
-		// Convert main message content to signed URL if it's media
-		if (['image', 'gif', 'audio'].includes(msg.type)) {
-			try {
-				msg.content = getSignedMediaUrl(msg.content, msg.type);
-			} catch (error) {
-				console.error('Failed to generate signed URL for message:', msg.id, error);
-			}
-		}
-
-		// Convert reply message content to signed URL if it's media
-		if (msg.reply_to_message_id && ['image', 'gif', 'audio'].includes(msg.reply_to_message_type)) {
-			try {
-				msg.reply_to_message_content = getSignedMediaUrl(msg.reply_to_message_content, msg.reply_to_message_type);
-			} catch (error) {
-				console.error('Failed to generate signed URL for reply message:', msg.reply_to_message_id, error);
-			}
-		}
-
+		// Content is already a public URL, no conversion needed
 		return {
 			...msg,
 			reactions: reactionsByMessage[msg.id] || []
@@ -481,7 +441,6 @@ export async function getRoomMessages(roomId, userId, limit = 100, offset = 0) {
 
 	return messagesWithReactions.reverse();
 }
-
 
 // Get new messages after a specific timestamp (for cache updates)
 export async function getNewMessages(roomId, userId, afterTimestamp) {
@@ -528,24 +487,7 @@ export async function getNewMessages(roomId, userId, afterTimestamp) {
 				args: [msg.id]
 			});
 
-			// Convert main message content to signed URL if it's media
-			if (['image', 'gif', 'audio'].includes(msg.type)) {
-				try {
-					msg.content = getSignedMediaUrl(msg.content, msg.type);
-				} catch (error) {
-					console.error('Failed to generate signed URL for message:', msg.id, error);
-				}
-			}
-
-			// Convert reply message content to signed URL if it's media
-			if (msg.reply_to_message_id && ['image', 'gif', 'audio'].includes(msg.reply_to_message_type)) {
-				try {
-					msg.reply_to_message_content = getSignedMediaUrl(msg.reply_to_message_content, msg.reply_to_message_type);
-				} catch (error) {
-					console.error('Failed to generate signed URL for reply message:', msg.reply_to_message_id, error);
-				}
-			}
-
+			// Content is already a public URL, no conversion needed
 			return {
 				...msg,
 				reactions: reactionsResult.rows || []
@@ -555,7 +497,6 @@ export async function getNewMessages(roomId, userId, afterTimestamp) {
 
 	return messagesWithReactions;
 }
-
 
 // Get total message count for a room (for pagination)
 export async function getMessageCount(roomId) {
@@ -726,7 +667,7 @@ export async function reactToRoomMessage(messageId, userId, emoji) {
 	};
 }
 
-// Get reactions for room message - NEW FUNCTION
+// Get reactions for room message
 export async function getRoomMessageReactions(messageId) {
 	const result = await db.execute({
 		sql: `SELECT rmr.*, u.username, u.gender
@@ -740,7 +681,7 @@ export async function getRoomMessageReactions(messageId) {
 	return result.rows;
 }
 
-// Remove reaction from room message - UPDATED
+// Remove reaction from room message
 export async function removeRoomMessageReaction(reactionId, userId) {
 	// First get reaction details to find room_id and message_id
 	const reactionCheck = await db.execute({

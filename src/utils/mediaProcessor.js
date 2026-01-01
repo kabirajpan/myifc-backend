@@ -1,7 +1,7 @@
 import cloudinary, { CLOUDINARY_FOLDER, MEDIA_SETTINGS, MAX_AUDIO_DURATION_SEC } from '../config/cloudinary.js';
 import { generateId } from './idGenerator.js';
 
-// Upload image to Cloudinary (PRIVATE - with auto-compression)
+// Upload image to Cloudinary (PUBLIC - with auto-compression)
 export async function uploadImage(buffer, userId) {
 	try {
 		const filename = `${generateId()}_${userId}`;
@@ -12,7 +12,7 @@ export async function uploadImage(buffer, userId) {
 					folder: `${CLOUDINARY_FOLDER}/images`,
 					public_id: filename,
 					resource_type: 'image',
-					type: 'authenticated',
+					type: 'upload',
 					overwrite: false,
 					invalidate: true,
 					format: 'avif',
@@ -41,7 +41,7 @@ export async function uploadImage(buffer, userId) {
 									folder: `${CLOUDINARY_FOLDER}/images`,
 									public_id: filename,
 									resource_type: 'image',
-									type: 'authenticated',
+									type: 'upload',
 									overwrite: true,
 									invalidate: true,
 									format: 'avif',
@@ -83,7 +83,7 @@ export async function uploadImage(buffer, userId) {
 	}
 }
 
-// ✅ WORKING: Upload GIF using direct base64 upload (PRIVATE - authenticated)
+// Upload GIF using direct base64 upload (PUBLIC)
 export async function uploadGif(buffer, userId) {
 	try {
 		const filename = `${generateId()}_${userId}`;
@@ -91,13 +91,13 @@ export async function uploadGif(buffer, userId) {
 		// Convert buffer to base64
 		const base64Data = `data:image/gif;base64,${buffer.toString('base64')}`;
 
-		// Use direct upload instead of stream (avoids upload_stream bug with authenticated type)
+		// Use direct upload instead of stream
 		const result = await cloudinary.uploader.upload(base64Data, {
 			folder: `${CLOUDINARY_FOLDER}/gifs`,
 			public_id: filename,
 			resource_type: 'image',
-			type: 'authenticated',  // ✅ PRIVATE - requires signed URL to access
-			format: 'gif',           // ✅ Keep as GIF format (preserves animation)
+			type: 'upload',
+			format: 'gif',
 			overwrite: false,
 			invalidate: true
 		});
@@ -114,7 +114,7 @@ export async function uploadGif(buffer, userId) {
 	}
 }
 
-// Upload and compress audio to Cloudinary (PRIVATE)
+// Upload and compress audio to Cloudinary (PUBLIC)
 export async function uploadAudio(buffer, userId) {
 	try {
 		const filename = `${generateId()}_${userId}`;
@@ -125,7 +125,7 @@ export async function uploadAudio(buffer, userId) {
 					folder: `${CLOUDINARY_FOLDER}/audio`,
 					public_id: filename,
 					resource_type: 'video',
-					type: 'authenticated',
+					type: 'upload',
 					format: 'mp3',
 					audio_codec: 'mp3',
 					bit_rate: '64k',
@@ -171,13 +171,13 @@ export async function deleteMedia(publicId, mediaType) {
 
 		if (mediaType === 'audio') {
 			resourceType = 'video';
-			deleteType = 'authenticated';
+			deleteType = 'upload';
 		} else if (mediaType === 'gif') {
-			resourceType = 'image';          // GIFs are image resources
-			deleteType = 'authenticated';    // GIFs use authenticated type
+			resourceType = 'image';
+			deleteType = 'upload';
 		} else {
 			resourceType = 'image';
-			deleteType = 'authenticated';
+			deleteType = 'upload';
 		}
 
 		const result = await cloudinary.uploader.destroy(publicId, {
@@ -200,13 +200,13 @@ export async function deleteMultipleMedia(publicIds, mediaType) {
 
 		if (mediaType === 'audio') {
 			resourceType = 'video';
-			deleteType = 'authenticated';
+			deleteType = 'upload';
 		} else if (mediaType === 'gif') {
-			resourceType = 'image';          // GIFs are image resources
-			deleteType = 'authenticated';    // GIFs use authenticated type
+			resourceType = 'image';
+			deleteType = 'upload';
 		} else {
 			resourceType = 'image';
-			deleteType = 'authenticated';
+			deleteType = 'upload';
 		}
 
 		const deletePromises = publicIds.map(publicId =>

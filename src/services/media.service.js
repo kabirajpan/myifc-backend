@@ -1,7 +1,5 @@
 import { validateMedia } from '../utils/mediaValidator.js';
 import { uploadImage, uploadGif, uploadAudio, deleteMedia } from '../utils/mediaProcessor.js';
-import { generateSignedUrl } from '../config/cloudinary.js';
-
 
 // media.service.js
 export async function uploadMediaFile(file, mediaType, userId) {
@@ -9,8 +7,8 @@ export async function uploadMediaFile(file, mediaType, userId) {
 	if (!validation.valid) throw new Error(validation.errors.join(', '));
 
 	const buffer = Buffer.from(await file.arrayBuffer());
-
 	let result;
+
 	switch (mediaType) {
 		case 'image':
 			result = await uploadImage(buffer, userId);
@@ -25,12 +23,12 @@ export async function uploadMediaFile(file, mediaType, userId) {
 			throw new Error('Invalid media type');
 	}
 
-	// **Important:** for GIF, return URL directly
+	// Return URL directly for all media types (now public)
 	return {
 		success: true,
 		data: {
 			public_id: result.public_id,
-			url: mediaType === 'gif' ? result.url : undefined, // GIF uses public URL
+			url: result.url, // All media now uses public URL
 			format: result.format,
 			size: result.size,
 			duration: result.duration || null,
@@ -39,16 +37,13 @@ export async function uploadMediaFile(file, mediaType, userId) {
 	};
 }
 
-
 // Delete media file from Cloudinary
 export async function deleteMediaFile(publicId, mediaType) {
 	try {
 		const result = await deleteMedia(publicId, mediaType);
-
 		if (result.result === 'ok' || result.result === 'not found') {
 			return { success: true, message: 'Media deleted successfully' };
 		}
-
 		throw new Error('Failed to delete media');
 	} catch (error) {
 		console.error('Delete media service error:', error);
@@ -62,32 +57,17 @@ export function extractPublicIdFromUrl(url) {
 		// Cloudinary URL format: https://res.cloudinary.com/{cloud_name}/{resource_type}/upload/v{version}/{public_id}.{format}
 		const urlParts = url.split('/');
 		const uploadIndex = urlParts.indexOf('upload');
-
 		if (uploadIndex === -1) {
 			throw new Error('Invalid Cloudinary URL');
 		}
-
 		// Get everything after 'upload/v{version}/'
 		const publicIdWithFormat = urlParts.slice(uploadIndex + 2).join('/');
-
 		// Remove file extension
 		const publicId = publicIdWithFormat.substring(0, publicIdWithFormat.lastIndexOf('.'));
-
 		return publicId;
 	} catch (error) {
 		console.error('Extract public_id error:', error);
 		throw new Error('Failed to extract public_id from URL');
-	}
-}
-
-// Generate signed URL for media access
-export function getSignedMediaUrl(publicId, mediaType) {
-	try {
-		const resourceType = mediaType === 'audio' ? 'video' : 'image';
-		return generateSignedUrl(publicId, resourceType);
-	} catch (error) {
-		console.error('Get signed URL error:', error);
-		throw error;
 	}
 }
 
