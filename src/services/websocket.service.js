@@ -31,7 +31,7 @@ export function broadcastNewMessage(session, message, senderUsername) {
 	});
 }
 
-// ✅ NEW: Broadcast reaction to P2P chat participant
+// Broadcast reaction to P2P chat participant
 export async function broadcastChatReaction(sessionId, reaction, messageId) {
 	// Get session details
 	const sessionResult = await db.execute({
@@ -66,7 +66,7 @@ export async function broadcastChatReaction(sessionId, reaction, messageId) {
 	return 0;
 }
 
-// ✅ NEW: Broadcast reaction removal to P2P chat participant
+// Broadcast reaction removal to P2P chat participant
 export async function broadcastChatReactionRemoval(sessionId, reactionId, messageId, userId) {
 	// Get session details
 	const sessionResult = await db.execute({
@@ -101,12 +101,16 @@ export async function broadcastChatReactionRemoval(sessionId, reactionId, messag
 	return 0;
 }
 
-// Broadcast message to all room members (excluding sender)
-export async function broadcastRoomMessage(roomId, message, excludeUserId = null) {
-	// Get all room members
+// ========================================
+// PROJECT WEBSOCKET FUNCTIONS (was Room)
+// ========================================
+
+// Broadcast message to all project members (excluding sender)
+export async function broadcastProjectMessage(projectId, message, excludeUserId = null) {
+	// Get all project members
 	const members = await db.execute({
-		sql: 'SELECT user_id FROM room_members WHERE room_id = ?',
-		args: [roomId]
+		sql: 'SELECT user_id FROM project_members WHERE project_id = ?',
+		args: [projectId]
 	});
 
 	let sentCount = 0;
@@ -119,7 +123,7 @@ export async function broadcastRoomMessage(roomId, message, excludeUserId = null
 		if (sendToUser(member.user_id, {
 			type: 'new_message',
 			data: {
-				room_id: roomId,
+				project_id: projectId,
 				message: {
 					...message,
 					isOwn: false // For other users
@@ -130,15 +134,15 @@ export async function broadcastRoomMessage(roomId, message, excludeUserId = null
 		}
 	}
 
-	console.log(`📢 Broadcast to ${sentCount} room members in room ${roomId}`);
+	console.log(`📢 Broadcast to ${sentCount} project members in project ${projectId}`);
 	return sentCount;
 }
 
-// Broadcast reaction to room members
-export async function broadcastRoomReaction(roomId, reaction, messageId) {
+// Broadcast reaction to project members
+export async function broadcastProjectReaction(projectId, reaction, messageId) {
 	const members = await db.execute({
-		sql: 'SELECT user_id FROM room_members WHERE room_id = ?',
-		args: [roomId]
+		sql: 'SELECT user_id FROM project_members WHERE project_id = ?',
+		args: [projectId]
 	});
 
 	let sentCount = 0;
@@ -147,7 +151,7 @@ export async function broadcastRoomReaction(roomId, reaction, messageId) {
 		if (sendToUser(member.user_id, {
 			type: 'message_reacted',
 			data: {
-				room_id: roomId,
+				project_id: projectId,
 				message_id: messageId,
 				reaction
 			}
@@ -156,15 +160,15 @@ export async function broadcastRoomReaction(roomId, reaction, messageId) {
 		}
 	}
 
-	console.log(`🎭 Broadcast reaction to ${sentCount} room members`);
+	console.log(`🎭 Broadcast reaction to ${sentCount} project members`);
 	return sentCount;
 }
 
-// Broadcast user joined/left room
-export async function broadcastRoomPresence(roomId, user, action) {
+// Broadcast user joined/left project
+export async function broadcastProjectPresence(projectId, user, action) {
 	const members = await db.execute({
-		sql: 'SELECT user_id FROM room_members WHERE room_id = ?',
-		args: [roomId]
+		sql: 'SELECT user_id FROM project_members WHERE project_id = ?',
+		args: [projectId]
 	});
 
 	let sentCount = 0;
@@ -175,9 +179,9 @@ export async function broadcastRoomPresence(roomId, user, action) {
 		}
 
 		if (sendToUser(member.user_id, {
-			type: 'room_presence',
+			type: 'project_presence',
 			data: {
-				room_id: roomId,
+				project_id: projectId,
 				user,
 				action // 'joined' or 'left'
 			}
@@ -186,15 +190,15 @@ export async function broadcastRoomPresence(roomId, user, action) {
 		}
 	}
 
-	console.log(`👥 Broadcast ${action} to ${sentCount} room members`);
+	console.log(`👥 Broadcast ${action} to ${sentCount} project members`);
 	return sentCount;
 }
 
-// Broadcast reaction removal to room members
-export async function broadcastRoomReactionRemoval(roomId, reactionId, messageId) {
+// Broadcast reaction removal to project members
+export async function broadcastProjectReactionRemoval(projectId, reactionId, messageId) {
 	const members = await db.execute({
-		sql: 'SELECT user_id FROM room_members WHERE room_id = ?',
-		args: [roomId]
+		sql: 'SELECT user_id FROM project_members WHERE project_id = ?',
+		args: [projectId]
 	});
 
 	let sentCount = 0;
@@ -203,7 +207,7 @@ export async function broadcastRoomReactionRemoval(roomId, reactionId, messageId
 		if (sendToUser(member.user_id, {
 			type: 'reaction_removed',
 			data: {
-				room_id: roomId,
+				project_id: projectId,
 				message_id: messageId,
 				reaction_id: reactionId
 			}
@@ -212,9 +216,22 @@ export async function broadcastRoomReactionRemoval(roomId, reactionId, messageId
 		}
 	}
 
-	console.log(`🗑️ Broadcast reaction removal to ${sentCount} room members`);
+	console.log(`🗑️ Broadcast reaction removal to ${sentCount} project members`);
 	return sentCount;
 }
+
+// ========================================
+// BACKWARD COMPATIBILITY (DEPRECATED)
+// ========================================
+// These are aliases for old room functions - will be removed later
+export const broadcastRoomMessage = broadcastProjectMessage;
+export const broadcastRoomReaction = broadcastProjectReaction;
+export const broadcastRoomPresence = broadcastProjectPresence;
+export const broadcastRoomReactionRemoval = broadcastProjectReactionRemoval;
+
+// ========================================
+// CONNECTION MANAGEMENT
+// ========================================
 
 // Add connection
 export function addConnection(userId, ws) {

@@ -164,19 +164,139 @@ export async function uploadAudio(buffer, userId) {
 	}
 }
 
+// Upload video to Cloudinary
+export async function uploadVideo(buffer, userId) {
+	try {
+		const filename = `${generateId()}_${userId}`;
+
+		return new Promise((resolve, reject) => {
+			const uploadStream = cloudinary.uploader.upload_stream(
+				{
+					folder: `${CLOUDINARY_FOLDER}/videos`,
+					public_id: filename,
+					resource_type: 'video',
+					type: 'upload',
+					overwrite: false,
+					invalidate: true
+				},
+				(error, result) => {
+					if (error) {
+						console.error('Cloudinary video upload error:', error);
+						reject(new Error('Failed to upload video'));
+					} else {
+						resolve({
+							url: result.secure_url,
+							public_id: result.public_id,
+							format: result.format,
+							size: result.bytes,
+							duration: result.duration || 0
+						});
+					}
+				}
+			);
+
+			uploadStream.end(buffer);
+		});
+	} catch (error) {
+		console.error('Upload video error:', error);
+		throw error;
+	}
+}
+
+// Upload PDF to Cloudinary
+export async function uploadPdf(buffer, userId, filename) {
+	try {
+		const fileId = `${generateId()}_${userId}`;
+
+		return new Promise((resolve, reject) => {
+			const uploadStream = cloudinary.uploader.upload_stream(
+				{
+					folder: `${CLOUDINARY_FOLDER}/pdfs`,
+					public_id: fileId,
+					resource_type: 'image',  // PDFs are handled as images
+					type: 'upload',
+					format: 'pdf',
+					overwrite: false,
+					invalidate: true
+				},
+				(error, result) => {
+					if (error) {
+						console.error('Cloudinary PDF upload error:', error);
+						reject(new Error('Failed to upload PDF'));
+					} else {
+						resolve({
+							url: result.secure_url,
+							public_id: result.public_id,
+							format: result.format,
+							size: result.bytes,
+							filename: filename
+						});
+					}
+				}
+			);
+
+			uploadStream.end(buffer);
+		});
+	} catch (error) {
+		console.error('Upload PDF error:', error);
+		throw error;
+	}
+}
+
+// Upload document/spreadsheet/presentation/archive/code to Cloudinary (raw files)
+export async function uploadRawFile(buffer, userId, filename, mediaType) {
+	try {
+		const fileId = `${generateId()}_${userId}`;
+
+		return new Promise((resolve, reject) => {
+			const uploadStream = cloudinary.uploader.upload_stream(
+				{
+					folder: `${CLOUDINARY_FOLDER}/${mediaType}s`,
+					public_id: fileId,
+					resource_type: 'raw',  // For non-media files
+					type: 'upload',
+					overwrite: false,
+					invalidate: true
+				},
+				(error, result) => {
+					if (error) {
+						console.error(`Cloudinary ${mediaType} upload error:`, error);
+						reject(new Error(`Failed to upload ${mediaType}`));
+					} else {
+						resolve({
+							url: result.secure_url,
+							public_id: result.public_id,
+							format: result.format,
+							size: result.bytes,
+							filename: filename
+						});
+					}
+				}
+			);
+
+			uploadStream.end(buffer);
+		});
+	} catch (error) {
+		console.error(`Upload ${mediaType} error:`, error);
+		throw error;
+	}
+}
+
 // Delete media from Cloudinary
 export async function deleteMedia(publicId, mediaType) {
 	try {
 		let resourceType, deleteType;
 
-		if (mediaType === 'audio') {
+		if (mediaType === 'audio' || mediaType === 'video') {
 			resourceType = 'video';
 			deleteType = 'upload';
-		} else if (mediaType === 'gif') {
-			resourceType = 'image';
+		} else if (mediaType === 'document' || mediaType === 'spreadsheet' ||
+			mediaType === 'presentation' || mediaType === 'archive' ||
+			mediaType === 'code') {
+			resourceType = 'raw';
 			deleteType = 'upload';
 		} else {
-			resourceType = 'image';
+			resourceType = 'image';  // image, gif, pdf
 			deleteType = 'upload';
 		}
 
@@ -196,25 +316,8 @@ export async function deleteMedia(publicId, mediaType) {
 // Delete multiple media files
 export async function deleteMultipleMedia(publicIds, mediaType) {
 	try {
-		let resourceType, deleteType;
-
-		if (mediaType === 'audio') {
-			resourceType = 'video';
-			deleteType = 'upload';
-		} else if (mediaType === 'gif') {
-			resourceType = 'image';
-			deleteType = 'upload';
-		} else {
-			resourceType = 'image';
-			deleteType = 'upload';
-		}
-
 		const deletePromises = publicIds.map(publicId =>
-			cloudinary.uploader.destroy(publicId, {
-				resource_type: resourceType,
-				type: deleteType,
-				invalidate: true
-			})
+			deleteMedia(publicId, mediaType)
 		);
 
 		const results = await Promise.allSettled(deletePromises);
